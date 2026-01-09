@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Vocab (US) — All Sheets Sync</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body{ font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, "Noto Sans TC", sans-serif; margin:0; padding:18px; line-height:1.35;}
+    h1{ font-size:18px; margin:0 0 10px;}
+    .hint{ font-size:13px; opacity:.8; margin-bottom:14px;}
+    .topbar{ max-width: 1100px; display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:10px;}
+    .btn{ padding:10px 12px; border-radius:12px; border:1px solid rgba(127,127,127,.35); background: rgba(127,127,127,.08); cursor:pointer;}
+    .btn:active{ transform: translateY(1px); }
+    .small{ font-size:12px; opacity:.8; }
+    .controls{ display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin:12px 0 14px; max-width:1100px;}
+    label{ font-size:12px; opacity:.85; display:block; margin-bottom:6px;}
+    select, input[type="range"], input[type="text"]{
+      width:100%; padding:10px; border-radius:10px; border:1px solid rgba(127,127,127,.35); background:transparent;
+    }
+    .section{ max-width:1100px; margin-top:16px; }
+    .sheetTitle{ font-weight:800; margin: 16px 0 10px; display:flex; gap:8px; flex-wrap:wrap; align-items:baseline;}
+    .badge{ font-size:12px; opacity:.8; padding:2px 8px; border-radius:999px; border:1px solid rgba(127,127,127,.35); }
+    .list{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+    @media (max-width: 980px){
+      .list{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 640px){
+      .list{ grid-template-columns: 1fr; }
+    }
+    button.card{ text-align:left; padding:14px; border-radius:14px; border:1px solid rgba(127,127,127,.35); background: rgba(127,127,127,.08); cursor:pointer;}
+    button.card:active{ transform: translateY(1px); }
+    .row1{ display:flex; justify-content:space-between; gap:12px; align-items:baseline; }
+    .word{ font-size:16px; font-weight:800; }
+    .meta{ font-size:12px; opacity:.75; white-space:nowrap; }
+    .grid{ margin-top:8px; display:grid; grid-template-columns:1fr; gap:6px; font-size:13px; }
+    .k{ opacity:.75; margin-right:6px; }
+    .status{ margin-top:14px; font-size:12px; opacity:.85; max-width:1100px; white-space:pre-wrap; }
+    .footerbar{ max-width:1100px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:14px;}
+  </style>
+</head>
+<body>
+  <h1>全分頁單字點讀（美式）</h1>
+  <div class="hint">從 Apps Script Web App 載入 vocab。點單字立即聽發音。</div>
+
+  <div class="topbar">
+    <button class="btn" id="refreshBtn">Refresh</button>
+    <button class="btn" id="loadMoreBtn">Load more</button>
+    <span class="small" id="lastLoaded">尚未載入。</span>
+  </div>
+
+  <div class="controls">
+    <div>
+      <label for="voice">Voice（優先 en-US）</label>
+      <select id="voice"></select>
+    </div>
+    <div>
+      <label for="rate">語速</label>
+      <input id="rate" type="range" min="0.6" max="1.2" step="0.05" value="0.95" />
+    </div>
+    <div style="grid-column: 1 / -1;">
+      <label for="filter">搜尋（英文/中文/B2/C1/分頁名/檔名都可）</label>
+      <input id="filter" type="text" placeholder="例如：peculiar / 奇怪 / p.14-19 / The Plague" />
+    </div>
+  </div>
+
+  <div class="footerbar">
+    <span class="small" id="shownInfo">顯示：0 / 0</span>
+    <span class="small" id="groupInfo"></span>
+  </div>
+
+  <div id="root"></div>
+  <div class="status" id="status"></div>
+
+<script>
+  // ✅ PASTE YOUR /exec URL HERE
+  const SCRIPT_API_URL = "https://script.google.com/macros/s/AKfycbyOZC65g0ASlAu8oRCHU6Pj9kORZ6PYPGvI5lsmH90Z7u92YofbUuWjHmeO8r3SaNMhWA/exec";
+
+  const PAGE_SIZE = 240;
+
+  // DOM Elements
+  const voiceSelect = document.getElementById('voice');
+  const rateInput = document.getElementById('rate');
+  const refreshBtn = document.getElementById('refreshBtn');
+  const loadMoreBtn = document.getElementById('loadMoreBtn');
+  const lastLoadedEl = document.getElementById('lastLoaded');
+  const filterEl = document.getElementById('filter');
+  const rootEl = document.getElementById('root');
+  const statusEl = document.getElementById('status');
+  const shownInfoEl = document.getElementById('shownInfo');
+  const groupInfoEl = document.getElementById('groupInfo');
+
+  let items = [];         
+  let renderLimit = PAGE_SIZE;
+  let groupedData = new Map(); 
+
+  // --- VOICE LOGIC ---
+  function speak(text) {
+    if (!('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = parseFloat(rateInput.value || "1");
+    const chosen = voiceSelect.value;
+    const voices = window.speechSynthesis.getVoices();
+    const v = voices.find(x => x.name === chosen);
+    if (v) u.voice = v;
+    u.lang = (v && v.lang) ? v.lang : "en-US";
+    window.speechSynthesis.speak(u);
+  }
+
+  function populateVoices() {
+    const voices = window.speechSynthesis.getVoices() || [];
+    const sorted = [...voices].sort((a, b) => {
+        const aUS = (a.lang || "").toLowerCase().includes("us");
+        const bUS = (b.lang || "").toLowerCase().includes("us");
+        return aUS === bUS ? a.name.localeCompare(b.name) : aUS ? -1 : 1;
+    });
+    voiceSelect.innerHTML = "";
+    sorted.forEach(v => {
+      const opt = document.createElement('option');
+      opt.value = v.name;
+      opt.textContent = `${v.name} (${v.lang})`;
+      voiceSelect.appendChild(opt);
+    });
+    if (sorted.length > 0) voiceSelect.value = sorted[0].name;
+  }
+  window.speechSynthesis.onvoiceschanged = populateVoices;
+
+  // --- DATA LOGIC ---
+  function getGroupKey(item) {
+    // Level 1 Grouping: By File Name (The Book)
+    return item.fileName || "Unknown File";
+  }
+
+  async function loadAll() {
+    statusEl.textContent = "Loading data...";
+    const url = SCRIPT_API_URL + (SCRIPT_API_URL.includes('?') ? '&' : '?') + 't=' + Date.now();
+    
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const json = await res.json();
+      
+      items = Array.isArray(json.items) ? json.items : [];
+      
+      groupedData.clear();
+      items.forEach(it => {
+        const key = getGroupKey(it);
+        if (!groupedData.has(key)) groupedData.set(key, []);
+        groupedData.get(key).push(it);
+      });
+
+      lastLoadedEl.textContent = `Loaded ${items.length} words`;
+      statusEl.textContent = "";
+      render(); 
+    } catch (e) {
+      statusEl.textContent = "Error: " + e.message;
+    }
+  }
+
+  // --- ROUTING ---
+  window.onpopstate = () => render();
+
+  function setRoute(groupKey) {
+    const url = new URL(window.location);
+    if (groupKey) {
+      url.searchParams.set('book', groupKey);
+    } else {
+      url.searchParams.delete('book');
+    }
+    window.history.pushState({}, '', url);
+    renderLimit = PAGE_SIZE; 
+    render();
+    window.scrollTo(0,0);
+  }
+
+  // --- HELPER: Create a single Card DOM ---
+  function createCardDOM(item) {
+    const btn = document.createElement('button');
+    btn.className = "card";
+    btn.innerHTML = `
+        <div class="row1">
+            <div class="word">${item.word}</div>
+            <div class="meta">🔊</div>
+        </div>
+        <div class="grid">
+            ${item.zh ? `<div><span class="k">ZH:</span>${item.zh}</div>` : ''}
+            ${item.b2 ? `<div><span class="k">B2:</span>${item.b2}</div>` : ''}
+            ${item.c1 ? `<div><span class="k">C1:</span>${item.c1}</div>` : ''}
+        </div>
+    `;
+    btn.onclick = () => speak(item.word);
+    return btn;
+  }
+
+  // --- RENDER FUNCTIONS ---
+  function render() {
+    const searchQuery = (filterEl.value || '').trim().toLowerCase();
+    const urlParams = new URLSearchParams(window.location.search);
+    const activeBook = urlParams.get('book');
+
+    rootEl.innerHTML = "";
+    loadMoreBtn.style.display = 'block';
+
+    if (searchQuery) {
+      renderGlobalSearch(searchQuery);
+      return;
+    }
+
+    if (activeBook && groupedData.has(activeBook)) {
+      renderBookView(activeBook);
+      return;
+    }
+
+    renderBookIndex();
+  }
+
+  function renderGlobalSearch(query) {
+    shownInfoEl.textContent = "Mode: Global Search";
+    groupInfoEl.textContent = "";
+    
+    const matches = items.filter(x => 
+      (x.word + x.zh + x.fileName + x.sheet).toLowerCase().includes(query)
+    );
+    
+    // Simple render for search
+    const visible = matches.slice(0, renderLimit);
+    if (visible.length === 0) {
+        rootEl.innerHTML = `<div style="opacity:0.6">No matches found.</div>`;
+        loadMoreBtn.style.display = 'none';
+        return;
+    }
+
+    const grid = document.createElement('div');
+    grid.className = "list";
+    visible.forEach(item => grid.appendChild(createCardDOM(item)));
+    rootEl.appendChild(grid);
+    
+    loadMoreBtn.style.display = visible.length >= matches.length ? 'none' : 'block';
+  }
+
+  // 🔥 THIS IS THE UPDATED FUNCTION YOU WANTED
+  function renderBookView(bookKey) {
+    const bookItems = groupedData.get(bookKey) || [];
+    
+    // 1. Header
+    const header = document.createElement('div');
+    header.style.marginBottom = "20px";
+    header.innerHTML = `
+      <button class="btn" onclick="setRoute(null)">← Back to Books</button>
+      <h2 style="margin:10px 0 0">${bookKey}</h2>
+    `;
+    rootEl.appendChild(header);
+
+    shownInfoEl.textContent = `Mode: Book View`;
+    groupInfoEl.textContent = `Total: ${bookItems.length} words`;
+    loadMoreBtn.style.display = 'none'; // Disable global pagination inside book view for cleaner layout
+
+    // 2. Group items by Sub-Sheet (Level 2 Grouping)
+    const sheetsMap = new Map();
+    bookItems.forEach(item => {
+        const s = item.sheet || "Misc";
+        if (!sheetsMap.has(s)) sheetsMap.set(s, []);
+        sheetsMap.get(s).push(item);
+    });
+
+    // 3. Sort sheet names naturally (p.1 before p.10)
+    const sortedSheets = [...sheetsMap.keys()].sort((a, b) => 
+        a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
+    );
+
+    // 4. Render each sub-sheet section
+    if (sortedSheets.length === 0) {
+        rootEl.innerHTML += `<div>No items in this book.</div>`;
+        return;
+    }
+
+    sortedSheets.forEach(sheetName => {
+        const subItems = sheetsMap.get(sheetName);
+        
+        // Section Title
+        const sectionTitle = document.createElement('h3');
+        sectionTitle.style.marginTop = "30px";
+        sectionTitle.style.marginBottom = "10px";
+        sectionTitle.style.opacity = "0.8";
+        sectionTitle.style.borderBottom = "1px solid rgba(127,127,127,0.2)";
+        sectionTitle.style.paddingBottom = "5px";
+        sectionTitle.textContent = sheetName; // e.g., "p.1-p.8"
+        rootEl.appendChild(sectionTitle);
+
+        // Section Grid
+        const grid = document.createElement('div');
+        grid.className = "list";
+        
+        subItems.forEach(item => {
+            grid.appendChild(createCardDOM(item));
+        });
+        rootEl.appendChild(grid);
+    });
+  }
+
+  function renderBookIndex() {
+    shownInfoEl.textContent = "Mode: Bookshelf";
+    groupInfoEl.textContent = `Total Books: ${groupedData.size}`;
+    loadMoreBtn.style.display = 'none'; 
+
+    const list = document.createElement('div');
+    list.className = "list";
+    const keys = [...groupedData.keys()].sort();
+
+    keys.forEach(key => {
+      const count = groupedData.get(key).length;
+      
+      // Calculate sub-sheet preview
+      const uniqueSheets = [...new Set(groupedData.get(key).map(i => i.sheet))];
+      // Sort sheets for preview
+      uniqueSheets.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+      
+      const sheetSubtitle = uniqueSheets.slice(0, 3).join(", ") + (uniqueSheets.length > 3 ? "..." : "");
+
+      const card = document.createElement('button');
+      card.className = "card";
+      card.innerHTML = `
+        <div class="row1">
+          <div class="word" style="font-size:16px">${key}</div> 
+          <div class="badge">${count}</div>
+        </div>
+        <div class="meta" style="margin-top:6px; opacity:0.6; font-size:12px">
+           Sections: ${sheetSubtitle}
+        </div>
+      `;
+      card.onclick = () => setRoute(key);
+      list.appendChild(card);
+    });
+
+    rootEl.appendChild(list);
+  }
+
+  refreshBtn.addEventListener('click', loadAll);
+  loadMoreBtn.addEventListener('click', () => { renderLimit += PAGE_SIZE; render(); });
+  filterEl.addEventListener('input', () => { renderLimit = PAGE_SIZE; render(); });
+
+  populateVoices();
+  loadAll();
+</script>
+</body>
+</html>
